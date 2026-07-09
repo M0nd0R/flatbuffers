@@ -9,13 +9,149 @@
 #include "test_assert.h"
 #include "tests/arrays_test_generated.h"
 
+#include <vector>
+
 namespace flatbuffers {
 namespace tests {
 
 using namespace MyGame::Example;
 
+namespace {
+
+Offset<Table> CreateEmptyTable(FlatBufferBuilder& fbb) {
+  auto start = fbb.StartTable();
+  return Offset<Table>(fbb.EndTable(start));
+}
+
+Offset<reflection::Object> CreateReflectionObject(
+    FlatBufferBuilder& fbb, const char* name,
+    Offset<Vector<Offset<reflection::Field>>> fields, bool is_struct = false,
+    int minalign = 0, int bytesize = 0) {
+  return reflection::CreateObject(fbb, fbb.CreateString(name), fields,
+                                  is_struct, minalign, bytesize, 0, 0, 0);
+}
+
+std::vector<uint8_t> BuilderBuffer(FlatBufferBuilder& fbb) {
+  return std::vector<uint8_t>(fbb.GetBufferPointer(),
+                              fbb.GetBufferPointer() + fbb.GetSize());
+}
+
+std::vector<uint8_t> BuildUnionVectorSchema() {
+  FlatBufferBuilder fbb;
+
+  auto none_type = reflection::CreateType(fbb, reflection::BaseType::None);
+  auto utype_type = reflection::CreateType(fbb, reflection::BaseType::UType);
+  auto item_type = reflection::CreateType(
+      fbb, reflection::BaseType::Obj, reflection::BaseType::None, 0);
+  auto vector_union_type = reflection::CreateType(
+      fbb, reflection::BaseType::Vector, reflection::BaseType::Union, 0);
+
+  std::vector<Offset<reflection::EnumVal>> enum_vals;
+  enum_vals.push_back(
+      reflection::CreateEnumVal(fbb, fbb.CreateString("NONE"), 0, none_type));
+  enum_vals.push_back(
+      reflection::CreateEnumVal(fbb, fbb.CreateString("Item"), 1, item_type));
+  auto enum_values = fbb.CreateVector(enum_vals);
+  auto enum_def = reflection::CreateEnum(fbb, fbb.CreateString("Any"),
+                                         enum_values, true, utype_type);
+  std::vector<Offset<reflection::Enum>> enums = {enum_def};
+
+  auto empty_fields = fbb.CreateVector(std::vector<Offset<reflection::Field>>{});
+  auto item_obj = CreateReflectionObject(fbb, "Item", empty_fields);
+
+  std::vector<Offset<reflection::Field>> root_fields;
+  root_fields.push_back(reflection::CreateField(
+      fbb, fbb.CreateString("items"), vector_union_type, 1, 6));
+  auto root_fields_vec = fbb.CreateVector(root_fields);
+  auto root_obj = CreateReflectionObject(fbb, "Root", root_fields_vec);
+
+  std::vector<Offset<reflection::Object>> objects = {item_obj, root_obj};
+  auto schema = reflection::CreateSchema(fbb, fbb.CreateVector(objects),
+                                         fbb.CreateVector(enums), 0, 0,
+                                         root_obj);
+  fbb.Finish(schema, reflection::SchemaIdentifier());
+  return BuilderBuffer(fbb);
+}
+
+std::vector<uint8_t> BuildUnionVectorMissingTypesData() {
+  FlatBufferBuilder fbb;
+  auto item = CreateEmptyTable(fbb);
+  std::vector<Offset<Table>> items = {item};
+  auto items_vec = fbb.CreateVector(items);
+  auto root_start = fbb.StartTable();
+  fbb.AddOffset(6, items_vec);
+  auto root = Offset<Table>(fbb.EndTable(root_start));
+  fbb.Finish(root);
+  return BuilderBuffer(fbb);
+}
+
+std::vector<uint8_t> BuildZeroSizedStructVectorSchema() {
+  FlatBufferBuilder fbb;
+
+  auto struct_vector_type = reflection::CreateType(
+      fbb, reflection::BaseType::Vector, reflection::BaseType::Obj, 0);
+
+  auto empty_fields = fbb.CreateVector(std::vector<Offset<reflection::Field>>{});
+  auto zero_struct =
+      CreateReflectionObject(fbb, "Zero", empty_fields, true, 1, 0);
+
+  std::vector<Offset<reflection::Field>> root_fields;
+  root_fields.push_back(reflection::CreateField(
+      fbb, fbb.CreateString("items"), struct_vector_type, 0, 4));
+  auto root_fields_vec = fbb.CreateVector(root_fields);
+  auto root_obj = CreateReflectionObject(fbb, "Root", root_fields_vec);
+
+  std::vector<Offset<reflection::Object>> objects = {zero_struct, root_obj};
+  std::vector<Offset<reflection::Enum>> enums;
+  auto schema = reflection::CreateSchema(fbb, fbb.CreateVector(objects),
+                                         fbb.CreateVector(enums), 0, 0,
+                                         root_obj);
+  fbb.Finish(schema, reflection::SchemaIdentifier());
+  return BuilderBuffer(fbb);
+}
+
+std::vector<uint8_t> BuildEmptyVectorData() {
+  FlatBufferBuilder fbb;
+  std::vector<uint8_t> empty;
+  auto vec = fbb.CreateVector(empty);
+  auto root_start = fbb.StartTable();
+  fbb.AddOffset(4, vec);
+  auto root = Offset<Table>(fbb.EndTable(root_start));
+  fbb.Finish(root);
+  return BuilderBuffer(fbb);
+}
+
+void ReflectionVerifierRejectsMalformedUnionVector() {
+  auto schema_buffer = BuildUnionVectorSchema();
+  Verifier schema_verifier(schema_buffer.data(), schema_buffer.size());
+  TEST_EQ(reflection::VerifySchemaBuffer(schema_verifier), true);
+  auto schema = reflection::GetSchema(schema_buffer.data());
+
+  auto data = BuildUnionVectorMissingTypesData();
+  TEST_EQ(flatbuffers::Verify(*schema, *schema->root_table(), data.data(),
+                              data.size()),
+          false);
+}
+
+void ReflectionVerifierRejectsZeroSizedStructVector() {
+  auto schema_buffer = BuildZeroSizedStructVectorSchema();
+  Verifier schema_verifier(schema_buffer.data(), schema_buffer.size());
+  TEST_EQ(reflection::VerifySchemaBuffer(schema_verifier), true);
+  auto schema = reflection::GetSchema(schema_buffer.data());
+
+  auto data = BuildEmptyVectorData();
+  TEST_EQ(flatbuffers::Verify(*schema, *schema->root_table(), data.data(),
+                              data.size()),
+          false);
+}
+
+}  // namespace
+
 void ReflectionTest(const std::string& tests_data_path, uint8_t* flatbuf,
                     size_t length) {
+  ReflectionVerifierRejectsMalformedUnionVector();
+  ReflectionVerifierRejectsZeroSizedStructVector();
+
   // Load a binary schema.
   std::string bfbsfile;
   TEST_EQ(flatbuffers::LoadFile((tests_data_path + "monster_test.bfbs").c_str(),

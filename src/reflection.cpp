@@ -36,6 +36,7 @@ static bool VerifyStruct(flatbuffers::Verifier& v,
                          const flatbuffers::Table& parent_table,
                          voffset_t field_offset, const reflection::Object& obj,
                          bool required) {
+  if (obj.bytesize() <= 0 || obj.minalign() <= 0) return false;
   auto offset = parent_table.GetOptionalFieldOffset(field_offset);
   if (required && !offset) {
     return false;
@@ -51,6 +52,7 @@ static bool VerifyVectorOfStructs(flatbuffers::Verifier& v,
                                   voffset_t field_offset,
                                   const reflection::Object& obj,
                                   bool required) {
+  if (obj.bytesize() <= 0 || obj.minalign() <= 0) return false;
   auto p = parent_table.GetPointer<const uint8_t*>(field_offset);
   if (required && !p) {
     return false;
@@ -156,6 +158,7 @@ static bool VerifyVector(flatbuffers::Verifier& v,
       auto type_vec = table.GetPointer<Vector<uint8_t>*>(vec_field.offset() -
                                                          sizeof(voffset_t));
       if (!v.VerifyVector(type_vec)) return false;
+      if (!type_vec) return false;
       if (type_vec->size() != vec->size()) return false;
       for (uoffset_t j = 0; j < vec->size(); j++) {
         //  get union type from the prev field
