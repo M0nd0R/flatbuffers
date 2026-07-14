@@ -4132,23 +4132,49 @@ bool StructDef::Deserialize(Parser& parser, const reflection::Object* object) {
   sortbysize = attributes.Lookup("original_order") == nullptr && !fixed;
   const auto& of = *(object->fields());
   auto indexes = std::vector<uoffset_t>(of.size());
+  auto seen = std::vector<uint8_t>(of.size(), 0);
   for (uoffset_t i = 0; i < of.size(); i++) {
-  uint16_t field_id = of.Get(i)->id();
-  if (field_id >= of.size()) {
-    parser.error_ = "Field ID " + std::to_string(field_id) + 
-                    " exceeds field count " + std::to_string(of.size());
-    return false;
+    uint16_t field_id = of.Get(i)->id();
+    if (field_id >= of.size()) {
+      parser.error_ = "Field ID " + std::to_string(field_id) +
+                      " exceeds field count " + std::to_string(of.size());
+      return false;
+    }
+    if (seen[field_id]) {
+      parser.error_ = "Duplicate field ID " + std::to_string(field_id);
+      return false;
+    }
+    seen[field_id] = 1;
+    indexes[field_id] = i;
   }
-  indexes[field_id] = i;
-}
   size_t tmp_struct_size = 0;
   for (size_t i = 0; i < indexes.size(); i++) {
     auto field = of.Get(indexes[i]);
     auto field_def = new FieldDef();
-    if (!field_def->Deserialize(parser, field) ||
-        fields.Add(field_def->name, field_def)) {
+    if (!field_def->Deserialize(parser, field)) {
       delete field_def;
       return false;
+    }
+    if (fixed) {
+      // Recompute padding since that's currently not serialized.
+      auto size = InlineSize(field_def->value.type);
+      auto next_field =
+          i + 1 < indexes.size() ? of.Get(indexes[i + 1]) : nullptr;
+      tmp_struct_size += size;
+      if (next_field) {
+        const auto next_offset = next_field->offset();
+        const auto field_end = field_def->value.offset + size;
+        if (next_offset < field_end) {
+          parser.error_ = "Invalid struct layout for field `" +
+                          field_def->name + "`";
+          delete field_def;
+          return false;
+        }
+        field_def->padding = next_offset - field_end;
+      } else {
+        field_def->padding = PaddingBytes(tmp_struct_size, minalign);
+      }
+      tmp_struct_size += field_def->padding;
     }
     if (field_def->key) {
       if (has_key) {
@@ -4158,19 +4184,15 @@ bool StructDef::Deserialize(Parser& parser, const reflection::Object* object) {
       }
       has_key = true;
     }
-    if (fixed) {
-      // Recompute padding since that's currently not serialized.
-      auto size = InlineSize(field_def->value.type);
-      auto next_field =
-          i + 1 < indexes.size() ? of.Get(indexes[i + 1]) : nullptr;
-      tmp_struct_size += size;
-      field_def->padding =
-          next_field ? (next_field->offset() - field_def->value.offset) - size
-                     : PaddingBytes(tmp_struct_size, minalign);
-      tmp_struct_size += field_def->padding;
+    if (fields.Add(field_def->name, field_def)) {
+      delete field_def;
+      return false;
     }
   }
-  FLATBUFFERS_ASSERT(static_cast<int>(tmp_struct_size) == object->bytesize());
+  if (fixed && static_cast<int>(tmp_struct_size) != object->bytesize()) {
+    parser.error_ = "Struct size mismatch for `" + name + "`";
+    return false;
+  }
   return true;
 }
 

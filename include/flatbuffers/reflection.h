@@ -75,16 +75,37 @@ static_assert(sizeof(kBaseTypeSize) / sizeof(size_t) ==
 
 // Size of a basic type, don't use with structs.
 constexpr size_t GetTypeSize(reflection::BaseType base_type) {
-  return kBaseTypeSize[base_type];
+  const auto base_type_value = static_cast<size_t>(base_type);
+  return base_type_value <= static_cast<size_t>(reflection::MaxBaseType)
+             ? kBaseTypeSize[base_type_value]
+             : 0;
+}
+
+inline const reflection::Object* GetTypeObjectByIndex(
+    const reflection::Schema& schema, int type_index) {
+  const auto* objects = schema.objects();
+  return type_index >= 0 && objects &&
+                 static_cast<uoffset_t>(type_index) < objects->size()
+             ? objects->Get(static_cast<uoffset_t>(type_index))
+             : nullptr;
+}
+
+inline const reflection::Enum* GetTypeEnumByIndex(
+    const reflection::Schema& schema, int type_index) {
+  const auto* enums = schema.enums();
+  return type_index >= 0 && enums &&
+                 static_cast<uoffset_t>(type_index) < enums->size()
+             ? enums->Get(static_cast<uoffset_t>(type_index))
+             : nullptr;
 }
 
 // Same as above, but now correctly returns the size of a struct if
 // the field (or vector element) is a struct.
 inline size_t GetTypeSizeInline(reflection::BaseType base_type, int type_index,
                                 const reflection::Schema& schema) {
-  if (base_type == reflection::Obj &&
-      schema.objects()->Get(type_index)->is_struct()) {
-    return schema.objects()->Get(type_index)->bytesize();
+  const auto* object = GetTypeObjectByIndex(schema, type_index);
+  if (base_type == reflection::Obj && object && object->is_struct()) {
+    return object->bytesize();
   } else {
     return GetTypeSize(base_type);
   }
@@ -425,17 +446,27 @@ pointer_inside_vector<T, U> piv(T* ptr, std::vector<U>& vec) {
 constexpr const char* UnionTypeFieldSuffix() { return "_type"; }
 
 // Helper to figure out the actual table type a union refers to.
-inline const reflection::Object& GetUnionType(
+inline const reflection::Object* GetUnionTypeObject(
     const reflection::Schema& schema, const reflection::Object& parent,
     const reflection::Field& unionfield, const Table& table) {
-  auto enumdef = schema.enums()->Get(unionfield.type()->index());
+  auto enumdef = GetTypeEnumByIndex(schema, unionfield.type()->index());
+  if (!enumdef) return nullptr;
   // TODO: this is clumsy and slow, but no other way to find it?
   auto type_field = parent.fields()->LookupByKey(
       (unionfield.name()->str() + UnionTypeFieldSuffix()).c_str());
-  FLATBUFFERS_ASSERT(type_field);
+  if (!type_field) return nullptr;
   auto union_type = GetFieldI<uint8_t>(table, *type_field);
   auto enumval = enumdef->values()->LookupByKey(union_type);
-  return *schema.objects()->Get(enumval->union_type()->index());
+  if (!enumval || !enumval->union_type()) return nullptr;
+  return GetTypeObjectByIndex(schema, enumval->union_type()->index());
+}
+
+inline const reflection::Object& GetUnionType(
+    const reflection::Schema& schema, const reflection::Object& parent,
+    const reflection::Field& unionfield, const Table& table) {
+  auto object = GetUnionTypeObject(schema, parent, unionfield, table);
+  FLATBUFFERS_ASSERT(object);
+  return *object;
 }
 
 // Changes the contents of a string inside a FlatBuffer. FlatBuffer must

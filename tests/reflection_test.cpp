@@ -1,5 +1,16 @@
 #include "reflection_test.h"
 
+#include <limits>
+#include <vector>
+
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#endif
+#include "bfbs_gen.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 #include "flatbuffers/minireflect.h"
 #include "flatbuffers/reflection.h"
 #include "flatbuffers/reflection_generated.h"
@@ -13,6 +24,189 @@ namespace flatbuffers {
 namespace tests {
 
 using namespace MyGame::Example;
+
+namespace {
+
+std::vector<uint8_t> LoadMalformedFieldIdSchema(
+    const std::string& tests_data_path) {
+  std::string bfbsfile;
+  TEST_EQ(flatbuffers::LoadFile((tests_data_path + "monster_test.bfbs").c_str(),
+                                true, &bfbsfile),
+          true);
+
+  std::vector<uint8_t> bfbs(bfbsfile.begin(), bfbsfile.end());
+  flatbuffers::Verifier verifier_before(bfbs.data(), bfbs.size());
+  TEST_EQ(reflection::VerifySchemaBuffer(verifier_before), true);
+
+  auto* schema = reflection::GetSchema(bfbs.data());
+  auto* root = const_cast<reflection::Object*>(schema->root_table());
+  TEST_NOTNULL(root);
+  TEST_ASSERT(root->fields() && root->fields()->size() > 0);
+
+  auto* field0 = const_cast<reflection::Field*>(root->fields()->Get(0));
+  auto* field_table = reinterpret_cast<flatbuffers::Table*>(field0);
+  TEST_EQ(field_table->SetField<uint16_t>(reflection::Field::VT_ID,
+                                          std::numeric_limits<uint16_t>::max(),
+                                          0),
+          true);
+
+  flatbuffers::Verifier verifier_after(bfbs.data(), bfbs.size());
+  TEST_EQ(reflection::VerifySchemaBuffer(verifier_after), false);
+  TEST_EQ(root->fields()->Get(0)->id(), std::numeric_limits<uint16_t>::max());
+  return bfbs;
+}
+
+std::vector<uint8_t> LoadMalformedTypeIndexSchema(
+    const std::string& tests_data_path) {
+  std::string bfbsfile;
+  TEST_EQ(flatbuffers::LoadFile((tests_data_path + "monster_test.bfbs").c_str(),
+                                true, &bfbsfile),
+          true);
+
+  std::vector<uint8_t> bfbs(bfbsfile.begin(), bfbsfile.end());
+  flatbuffers::Verifier verifier_before(bfbs.data(), bfbs.size());
+  TEST_EQ(reflection::VerifySchemaBuffer(verifier_before), true);
+
+  auto* schema = reflection::GetSchema(bfbs.data());
+  auto* root = const_cast<reflection::Object*>(schema->root_table());
+  auto* pos_field =
+      const_cast<reflection::Field*>(root->fields()->LookupByKey("pos"));
+  TEST_NOTNULL(pos_field);
+
+  auto* type_table =
+      reinterpret_cast<flatbuffers::Table*>(const_cast<reflection::Type*>(
+          pos_field->type()));
+  TEST_EQ(type_table->SetField<int32_t>(
+              reflection::Type::VT_INDEX,
+              std::numeric_limits<int32_t>::max(), -1),
+          true);
+
+  flatbuffers::Verifier verifier_after(bfbs.data(), bfbs.size());
+  TEST_EQ(reflection::VerifySchemaBuffer(verifier_after), false);
+  TEST_EQ(pos_field->type()->index(), std::numeric_limits<int32_t>::max());
+  return bfbs;
+}
+
+std::vector<uint8_t> LoadMalformedStructLayoutSchema(
+    const std::string& tests_data_path) {
+  std::string bfbsfile;
+  TEST_EQ(flatbuffers::LoadFile((tests_data_path + "monster_test.bfbs").c_str(),
+                                true, &bfbsfile),
+          true);
+
+  std::vector<uint8_t> bfbs(bfbsfile.begin(), bfbsfile.end());
+  flatbuffers::Verifier verifier_before(bfbs.data(), bfbs.size());
+  TEST_EQ(reflection::VerifySchemaBuffer(verifier_before), true);
+
+  auto* schema = reflection::GetSchema(bfbs.data());
+  auto* vec3 = const_cast<reflection::Object*>(
+      schema->objects()->LookupByKey("MyGame.Example.Vec3"));
+  TEST_NOTNULL(vec3);
+  auto* vec3_table = reinterpret_cast<flatbuffers::Table*>(vec3);
+  TEST_EQ(vec3_table->SetField<int32_t>(reflection::Object::VT_BYTESIZE, 1, 0),
+          true);
+
+  auto* z_field = const_cast<reflection::Field*>(vec3->fields()->LookupByKey("z"));
+  TEST_NOTNULL(z_field);
+  auto* z_field_table = reinterpret_cast<flatbuffers::Table*>(z_field);
+  TEST_EQ(z_field_table->SetField<uint16_t>(
+              reflection::Field::VT_OFFSET,
+              std::numeric_limits<uint16_t>::max(), 0),
+          true);
+
+  flatbuffers::Verifier verifier_after(bfbs.data(), bfbs.size());
+  TEST_EQ(reflection::VerifySchemaBuffer(verifier_after), false);
+  TEST_EQ(vec3->bytesize(), 1);
+  TEST_EQ(z_field->offset(), std::numeric_limits<uint16_t>::max());
+  return bfbs;
+}
+
+std::vector<uint8_t> LoadMalformedUnionEnumSchema(
+    const std::string& tests_data_path) {
+  std::string bfbsfile;
+  TEST_EQ(flatbuffers::LoadFile((tests_data_path + "monster_test.bfbs").c_str(),
+                                true, &bfbsfile),
+          true);
+
+  std::vector<uint8_t> bfbs(bfbsfile.begin(), bfbsfile.end());
+  flatbuffers::Verifier verifier_before(bfbs.data(), bfbs.size());
+  TEST_EQ(reflection::VerifySchemaBuffer(verifier_before), true);
+
+  auto* schema = reflection::GetSchema(bfbs.data());
+  auto* root = schema->root_table();
+  auto* test_field = root->fields()->LookupByKey("test");
+  TEST_NOTNULL(test_field);
+  auto* any_enum = const_cast<reflection::Enum*>(
+      schema->enums()->Get(test_field->type()->index()));
+  TEST_NOTNULL(any_enum);
+
+  auto* monster_val =
+      const_cast<reflection::EnumVal*>(any_enum->values()->Get(1));
+  TEST_NOTNULL(monster_val);
+  auto* monster_val_table = reinterpret_cast<flatbuffers::Table*>(monster_val);
+  TEST_EQ(monster_val_table->SetField<int64_t>(reflection::EnumVal::VT_VALUE,
+                                               100, 0),
+          true);
+
+  flatbuffers::Verifier verifier_after(bfbs.data(), bfbs.size());
+  TEST_EQ(reflection::VerifySchemaBuffer(verifier_after), false);
+  TEST_EQ(monster_val->value(), 100);
+  return bfbs;
+}
+
+class FieldIdMappingBfbsGenerator final : public BaseBfbsGenerator {
+ public:
+  using BaseBfbsGenerator::GenerateCode;
+
+  Status GenerateFromSchema(const reflection::Schema* schema,
+                            const CodeGenOptions&) override {
+    visited_fields.clear();
+    TEST_NOTNULL(schema);
+    TEST_NOTNULL(schema->root_table());
+    ForAllFields(schema->root_table(), /*reverse=*/false,
+                 [&](const reflection::Field* field) {
+                   visited_fields.push_back(field->name()->str());
+                 });
+    return OK;
+  }
+
+  Status GenerateCode(const Parser&, const std::string&,
+                      const std::string&) override {
+    return NOT_IMPLEMENTED;
+  }
+
+  Status GenerateMakeRule(const Parser&, const std::string&,
+                          const std::string&, std::string&) override {
+    return NOT_IMPLEMENTED;
+  }
+
+  Status GenerateGrpcCode(const Parser&, const std::string&,
+                          const std::string&) override {
+    return NOT_IMPLEMENTED;
+  }
+
+  Status GenerateRootFile(const Parser&, const std::string&) override {
+    return NOT_IMPLEMENTED;
+  }
+
+  bool IsSchemaOnly() const override { return true; }
+
+  bool SupportsBfbsGeneration() const override { return true; }
+
+  bool SupportsRootFileGeneration() const override { return false; }
+
+  IDLOptions::Language Language() const override { return IDLOptions::kCpp; }
+
+  std::string LanguageName() const override { return "TestBfbs"; }
+
+  uint64_t SupportedAdvancedFeatures() const override {
+    return std::numeric_limits<uint64_t>::max();
+  }
+
+  std::vector<std::string> visited_fields;
+};
+
+}  // namespace
 
 void ReflectionTest(const std::string& tests_data_path, uint8_t* flatbuf,
                     size_t length) {
@@ -333,6 +527,83 @@ void ForAllFieldsReverseTest(const std::string& tests_data_path) {
       TEST_ASSERT(reverse_ids[i - 1] > reverse_ids[i]);
     }
   }
+}
+
+void MalformedBfbsFieldIdsTest(const std::string& tests_data_path) {
+  auto bfbs = LoadMalformedFieldIdSchema(tests_data_path);
+  auto* schema = reflection::GetSchema(bfbs.data());
+  auto* root = schema->root_table();
+  TEST_NOTNULL(root);
+
+  std::vector<std::string> reflected_fields;
+  flatbuffers::ForAllFields(root, /*reverse=*/false,
+                            [&](const reflection::Field* field) {
+                              reflected_fields.push_back(field->name()->str());
+                            });
+  TEST_EQ(reflected_fields.size(), root->fields()->size());
+  TEST_EQ_STR(reflected_fields.front().c_str(),
+              root->fields()->Get(0)->name()->c_str());
+
+  FieldIdMappingBfbsGenerator generator;
+  CodeGenOptions options;
+  TEST_EQ(generator.GenerateFromSchema(schema, options),
+          CodeGenerator::OK);
+  TEST_EQ(generator.visited_fields.size(), root->fields()->size());
+  TEST_EQ_STR(generator.visited_fields.front().c_str(),
+              root->fields()->Get(0)->name()->c_str());
+}
+
+void MalformedBfbsTypeIndexTest(const std::string& tests_data_path) {
+  auto bfbs = LoadMalformedTypeIndexSchema(tests_data_path);
+  auto* schema = reflection::GetSchema(bfbs.data());
+
+  std::string binary_contents;
+  TEST_EQ(flatbuffers::LoadFile((tests_data_path + "monsterdata_test.mon").c_str(),
+                                true, &binary_contents),
+          true);
+  TEST_EQ(flatbuffers::Verify(
+              *schema, *schema->root_table(),
+              reinterpret_cast<const uint8_t*>(binary_contents.data()),
+              binary_contents.size()),
+          false);
+}
+
+void MalformedBfbsStructLayoutTest(const std::string& tests_data_path) {
+  auto bfbs = LoadMalformedStructLayoutSchema(tests_data_path);
+  auto* schema = reflection::GetSchema(bfbs.data());
+
+  std::string binary_contents;
+  TEST_EQ(flatbuffers::LoadFile((tests_data_path + "monsterdata_test.mon").c_str(),
+                                true, &binary_contents),
+          true);
+  TEST_EQ(flatbuffers::Verify(
+              *schema, *schema->root_table(),
+              reinterpret_cast<const uint8_t*>(binary_contents.data()),
+              binary_contents.size()),
+          false);
+}
+
+void MalformedBfbsUnionEnumTest(const std::string& tests_data_path) {
+  auto bfbs = LoadMalformedUnionEnumSchema(tests_data_path);
+  auto* schema = reflection::GetSchema(bfbs.data());
+
+  std::string binary_contents;
+  TEST_EQ(flatbuffers::LoadFile((tests_data_path + "monsterdata_test.mon").c_str(),
+                                true, &binary_contents),
+          true);
+  auto* monster = flatbuffers::GetAnyRoot(
+      reinterpret_cast<const uint8_t*>(binary_contents.data()));
+  TEST_EQ(flatbuffers::Verify(
+              *schema, *schema->root_table(),
+              reinterpret_cast<const uint8_t*>(binary_contents.data()),
+              binary_contents.size()),
+          false);
+
+  flatbuffers::FlatBufferBuilder builder;
+  auto copied =
+      flatbuffers::CopyTable(builder, *schema, *schema->root_table(), *monster,
+                             /*use_string_pooling=*/false);
+  TEST_ASSERT(copied.o != 0);
 }
 
 void MiniReflectFlatBuffersTest(uint8_t* flatbuf) {

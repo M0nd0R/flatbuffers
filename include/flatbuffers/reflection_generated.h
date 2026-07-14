@@ -1371,27 +1371,213 @@ struct Schema FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
-    return VerifyTableStart(verifier) &&
-           VerifyOffsetRequired(verifier, VT_OBJECTS) &&
-           verifier.VerifyVector(objects()) &&
-           verifier.VerifyVectorOfTables(objects()) &&
-           VerifyOffsetRequired(verifier, VT_ENUMS) &&
-           verifier.VerifyVector(enums()) &&
-           verifier.VerifyVectorOfTables(enums()) &&
-           VerifyOffset(verifier, VT_FILE_IDENT) &&
-           verifier.VerifyString(file_ident()) &&
-           VerifyOffset(verifier, VT_FILE_EXT) &&
-           verifier.VerifyString(file_ext()) &&
-           VerifyOffset(verifier, VT_ROOT_TABLE) &&
-           verifier.VerifyTable(root_table()) &&
-           VerifyOffset(verifier, VT_SERVICES) &&
-           verifier.VerifyVector(services()) &&
-           verifier.VerifyVectorOfTables(services()) &&
-           VerifyField<uint64_t>(verifier, VT_ADVANCED_FEATURES, 8) &&
-           VerifyOffset(verifier, VT_FBS_FILES) &&
-           verifier.VerifyVector(fbs_files()) &&
-           verifier.VerifyVectorOfTables(fbs_files()) &&
-           verifier.EndTable();
+    if (!(VerifyTableStart(verifier) &&
+          VerifyOffsetRequired(verifier, VT_OBJECTS) &&
+          verifier.VerifyVector(objects()) &&
+          verifier.VerifyVectorOfTables(objects()) &&
+          VerifyOffsetRequired(verifier, VT_ENUMS) &&
+          verifier.VerifyVector(enums()) &&
+          verifier.VerifyVectorOfTables(enums()) &&
+          VerifyOffset(verifier, VT_FILE_IDENT) &&
+          verifier.VerifyString(file_ident()) &&
+          VerifyOffset(verifier, VT_FILE_EXT) &&
+          verifier.VerifyString(file_ext()) &&
+          VerifyOffset(verifier, VT_ROOT_TABLE) &&
+          verifier.VerifyTable(root_table()) &&
+          VerifyOffset(verifier, VT_SERVICES) &&
+          verifier.VerifyVector(services()) &&
+          verifier.VerifyVectorOfTables(services()) &&
+          VerifyField<uint64_t>(verifier, VT_ADVANCED_FEATURES, 8) &&
+          VerifyOffset(verifier, VT_FBS_FILES) &&
+          verifier.VerifyVector(fbs_files()) &&
+          verifier.VerifyVectorOfTables(fbs_files()) &&
+          verifier.EndTable())) {
+      return false;
+    }
+
+    const auto object_count = objects()->size();
+    const auto enum_count = enums()->size();
+    auto get_object = [&](int32_t index) -> const reflection::Object * {
+      return index >= 0 &&
+                     static_cast<::flatbuffers::uoffset_t>(index) < object_count
+                 ? objects()->Get(static_cast<::flatbuffers::uoffset_t>(index))
+                 : nullptr;
+    };
+    auto get_enum = [&](int32_t index) -> const reflection::Enum * {
+      return index >= 0 &&
+                     static_cast<::flatbuffers::uoffset_t>(index) < enum_count
+                 ? enums()->Get(static_cast<::flatbuffers::uoffset_t>(index))
+                 : nullptr;
+    };
+    auto is_power_of_two = [](uint64_t value) {
+      return value != 0 && (value & (value - 1)) == 0;
+    };
+    auto scalar_size = [](reflection::BaseType type) -> uint64_t {
+      switch (type) {
+        case reflection::UType:
+        case reflection::Bool:
+        case reflection::Byte:
+        case reflection::UByte: return 1;
+        case reflection::Short:
+        case reflection::UShort: return 2;
+        case reflection::Int:
+        case reflection::UInt:
+        case reflection::Float: return 4;
+        case reflection::Long:
+        case reflection::ULong:
+        case reflection::Double: return 8;
+        default: return 0;
+      }
+    };
+    auto inline_layout = [&](const reflection::Type *type, uint64_t *size,
+                             uint64_t *align) {
+      const auto scalar = scalar_size(type->base_type());
+      if (scalar != 0) {
+        *size = scalar;
+        *align = scalar;
+        return true;
+      }
+
+      if (type->base_type() == reflection::Obj) {
+        const auto *object = get_object(type->index());
+        if (!(object && object->is_struct())) return false;
+        if (!verifier.Check(object->minalign() > 0 &&
+                            object->bytesize() >= 0)) {
+          return false;
+        }
+        const auto object_align = static_cast<uint64_t>(object->minalign());
+        const auto object_size = static_cast<uint64_t>(object->bytesize());
+        if (!verifier.Check(is_power_of_two(object_align) &&
+                            object_size % object_align == 0)) {
+          return false;
+        }
+        *size = object_size;
+        *align = object_align;
+        return true;
+      }
+
+      if (type->base_type() != reflection::Array ||
+          !verifier.Check(type->fixed_length() > 0)) {
+        return false;
+      }
+
+      uint64_t element_size = scalar_size(type->element());
+      uint64_t element_align = element_size;
+      if (element_size == 0) {
+        if (type->element() != reflection::Obj) return false;
+        const auto *object = get_object(type->index());
+        if (!(object && object->is_struct())) return false;
+        if (!verifier.Check(object->minalign() > 0 &&
+                            object->bytesize() >= 0)) {
+          return false;
+        }
+        element_align = static_cast<uint64_t>(object->minalign());
+        element_size = static_cast<uint64_t>(object->bytesize());
+        if (!verifier.Check(is_power_of_two(element_align) &&
+                            element_size % element_align == 0)) {
+          return false;
+        }
+      }
+
+      *size = element_size * static_cast<uint64_t>(type->fixed_length());
+      *align = element_align;
+      return true;
+    };
+    auto verify_type = [&](const reflection::Type *type) {
+      const auto base_type = static_cast<int>(type->base_type());
+      const auto element = static_cast<int>(type->element());
+      if (!verifier.Check(base_type >= reflection::None &&
+                          base_type <= reflection::MaxBaseType &&
+                          element >= reflection::None &&
+                          element <= reflection::MaxBaseType)) {
+        return false;
+      }
+
+      const auto index = type->index();
+      switch (type->base_type()) {
+        case reflection::Obj:
+          return verifier.Check(get_object(index) != nullptr);
+        case reflection::Union:
+          return verifier.Check(get_enum(index) != nullptr);
+        case reflection::Vector:
+        case reflection::Vector64:
+        case reflection::Array:
+          if (type->element() == reflection::Obj) {
+            return verifier.Check(get_object(index) != nullptr);
+          }
+          if (type->element() == reflection::Union) {
+            return verifier.Check(get_enum(index) != nullptr);
+          }
+          return true;
+        default: return true;
+      }
+    };
+
+    for (::flatbuffers::uoffset_t i = 0; i < enums()->size(); ++i) {
+      const auto *enum_def = enums()->Get(i);
+      if (!verify_type(enum_def->underlying_type())) return false;
+      for (::flatbuffers::uoffset_t j = 0; j < enum_def->values()->size();
+           ++j) {
+        const auto *enum_val = enum_def->values()->Get(j);
+        if (enum_def->is_union() && j > 0 &&
+            !verifier.Check(enum_def->values()->Get(j - 1)->value() <
+                            enum_val->value())) {
+          return false;
+        }
+        const auto *union_type = enum_val->union_type();
+        if (union_type && !verify_type(union_type)) return false;
+      }
+    }
+
+    for (::flatbuffers::uoffset_t i = 0; i < objects()->size(); ++i) {
+      const auto *object = objects()->Get(i);
+      const auto *fields = object->fields();
+      if (object->is_struct()) {
+        if (!verifier.Check(object->minalign() > 0 &&
+                            object->bytesize() >= 0)) {
+          return false;
+        }
+        const auto object_align = static_cast<uint64_t>(object->minalign());
+        const auto object_size = static_cast<uint64_t>(object->bytesize());
+        if (!verifier.Check(is_power_of_two(object_align) &&
+                            object_size % object_align == 0)) {
+          return false;
+        }
+      }
+      std::vector<uint8_t> seen(fields->size(), 0);
+      for (::flatbuffers::uoffset_t j = 0; j < fields->size(); ++j) {
+        const auto *field = fields->Get(j);
+        if (!verify_type(field->type())) return false;
+        const auto field_id = field->id();
+        if (!verifier.Check(field_id < fields->size())) return false;
+        if (!verifier.Check(seen[field_id] == 0)) return false;
+        seen[field_id] = 1;
+        if (object->is_struct()) {
+          uint64_t field_size = 0;
+          uint64_t field_align = 0;
+          if (!inline_layout(field->type(), &field_size, &field_align)) {
+            return false;
+          }
+          const auto field_offset = static_cast<uint64_t>(field->offset());
+          const auto field_padding = static_cast<uint64_t>(field->padding());
+          const auto object_size = static_cast<uint64_t>(object->bytesize());
+          if (!verifier.Check(field_align > 0 &&
+                              field_offset % field_align == 0)) {
+            return false;
+          }
+          if (!verifier.Check(field_offset <= object_size &&
+                              field_size <= object_size - field_offset)) {
+            return false;
+          }
+          if (!verifier.Check(
+                  field_padding <= object_size - field_offset - field_size)) {
+            return false;
+          }
+        }
+      }
+    }
+
+    return true;
   }
 };
 

@@ -32,7 +32,107 @@ static void CopyInline(FlatBufferBuilder& fbb,
   fbb.TrackField(fielddef.offset(), fbb.GetSize());
 }
 
+static bool IsPowerOfTwo(size_t value) {
+  return value != 0 && (value & (value - 1)) == 0;
+}
+
+static size_t GetScalarTypeSize(const reflection::BaseType base_type) {
+  switch (base_type) {
+    case reflection::UType:
+    case reflection::Bool:
+    case reflection::Byte:
+    case reflection::UByte:
+    case reflection::Short:
+    case reflection::UShort:
+    case reflection::Int:
+    case reflection::UInt:
+    case reflection::Long:
+    case reflection::ULong:
+    case reflection::Float:
+    case reflection::Double: return GetTypeSize(base_type);
+    default: return 0;
+  }
+}
+
+static bool GetInlineSizeAndAlignment(const reflection::Schema& schema,
+                                      const reflection::Type& type,
+                                      size_t* size, size_t* align) {
+  const auto scalar_size = GetScalarTypeSize(type.base_type());
+  if (scalar_size != 0) {
+    *size = scalar_size;
+    *align = scalar_size;
+    return true;
+  }
+
+  if (type.base_type() == reflection::Obj) {
+    auto* object = GetTypeObjectByIndex(schema, type.index());
+    if (!(object && object->is_struct()) || object->minalign() <= 0 ||
+        object->bytesize() < 0) {
+      return false;
+    }
+    *size = static_cast<size_t>(object->bytesize());
+    *align = static_cast<size_t>(object->minalign());
+    return IsPowerOfTwo(*align) && (*size % *align) == 0;
+  }
+
+  if (type.base_type() != reflection::Array || type.fixed_length() == 0) {
+    return false;
+  }
+
+  const auto element_scalar_size = GetScalarTypeSize(type.element());
+  if (element_scalar_size != 0) {
+    *size = element_scalar_size * type.fixed_length();
+    *align = element_scalar_size;
+    return true;
+  }
+
+  if (type.element() != reflection::Obj) return false;
+  auto* object = GetTypeObjectByIndex(schema, type.index());
+  if (!(object && object->is_struct()) || object->minalign() <= 0 ||
+      object->bytesize() < 0) {
+    return false;
+  }
+  *size = static_cast<size_t>(object->bytesize()) * type.fixed_length();
+  *align = static_cast<size_t>(object->minalign());
+  return IsPowerOfTwo(*align) &&
+         (static_cast<size_t>(object->bytesize()) % *align) == 0;
+}
+
+static bool VerifyStructDef(const reflection::Schema& schema,
+                            const reflection::Object& obj) {
+  if (!obj.is_struct() || obj.minalign() <= 0 || obj.bytesize() < 0) {
+    return false;
+  }
+  const auto object_align = static_cast<size_t>(obj.minalign());
+  const auto object_size = static_cast<size_t>(obj.bytesize());
+  if (!IsPowerOfTwo(object_align) || (object_size % object_align) != 0) {
+    return false;
+  }
+
+  for (uoffset_t i = 0; i < obj.fields()->size(); ++i) {
+    auto* field = obj.fields()->Get(i);
+    size_t field_size = 0;
+    size_t field_align = 0;
+    if (!GetInlineSizeAndAlignment(schema, *field->type(), &field_size,
+                                   &field_align) ||
+        field_align == 0) {
+      return false;
+    }
+
+    const auto field_offset = static_cast<size_t>(field->offset());
+    const auto field_padding = static_cast<size_t>(field->padding());
+    if ((field_offset % field_align) != 0 || field_offset > object_size ||
+        field_size > object_size - field_offset ||
+        field_padding > object_size - field_offset - field_size) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 static bool VerifyStruct(flatbuffers::Verifier& v,
+                         const reflection::Schema& schema,
                          const flatbuffers::Table& parent_table,
                          voffset_t field_offset, const reflection::Object& obj,
                          bool required) {
@@ -42,11 +142,13 @@ static bool VerifyStruct(flatbuffers::Verifier& v,
   }
 
   return !offset ||
+         (VerifyStructDef(schema, obj) &&
          v.VerifyFieldStruct(reinterpret_cast<const uint8_t*>(&parent_table),
-                             offset, obj.bytesize(), obj.minalign());
+                             offset, obj.bytesize(), obj.minalign()));
 }
 
 static bool VerifyVectorOfStructs(flatbuffers::Verifier& v,
+                                  const reflection::Schema& schema,
                                   const flatbuffers::Table& parent_table,
                                   voffset_t field_offset,
                                   const reflection::Object& obj,
@@ -56,7 +158,8 @@ static bool VerifyVectorOfStructs(flatbuffers::Verifier& v,
     return false;
   }
 
-  return !p || v.VerifyVectorOrString(p, obj.bytesize());
+  return !p || (VerifyStructDef(schema, obj) &&
+                v.VerifyVectorOrString(p, obj.bytesize()));
 }
 
 // forward declare to resolve cyclic deps between VerifyObject and VerifyVector
@@ -70,12 +173,15 @@ static bool VerifyUnion(flatbuffers::Verifier& v,
                         const uint8_t* elem,
                         const reflection::Field& union_field) {
   if (!utype) return true;  // Not present.
-  auto fb_enum = schema.enums()->Get(union_field.type()->index());
-  if (utype >= fb_enum->values()->size()) return false;
-  auto elem_type = fb_enum->values()->Get(utype)->union_type();
+  auto fb_enum = GetTypeEnumByIndex(schema, union_field.type()->index());
+  if (!fb_enum) return false;
+  auto elem_val = fb_enum->values()->LookupByKey(utype);
+  if (!elem_val || !elem_val->union_type()) return false;
+  auto elem_type = elem_val->union_type();
   switch (elem_type->base_type()) {
     case reflection::Obj: {
-      auto elem_obj = schema.objects()->Get(elem_type->index());
+      auto elem_obj = GetTypeObjectByIndex(schema, elem_type->index());
+      if (!elem_obj) return false;
       if (elem_obj->is_struct()) {
         return v.VerifyFromPointer(elem, elem_obj->bytesize());
       } else {
@@ -130,9 +236,10 @@ static bool VerifyVector(flatbuffers::Verifier& v,
       }
     }
     case reflection::Obj: {
-      auto obj = schema.objects()->Get(vec_field.type()->index());
+      auto obj = GetTypeObjectByIndex(schema, vec_field.type()->index());
+      if (!obj) return false;
       if (obj->is_struct()) {
-        return VerifyVectorOfStructs(v, table, vec_field.offset(), *obj,
+        return VerifyVectorOfStructs(v, schema, table, vec_field.offset(), *obj,
                                      vec_field.required());
       } else {
         auto vec =
@@ -233,9 +340,11 @@ static bool VerifyObject(flatbuffers::Verifier& v,
         if (!VerifyVector(v, schema, *table, *field_def)) return false;
         break;
       case reflection::Obj: {
-        auto child_obj = schema.objects()->Get(field_def->type()->index());
+        auto child_obj =
+            GetTypeObjectByIndex(schema, field_def->type()->index());
+        if (!child_obj) return false;
         if (child_obj->is_struct()) {
-          if (!VerifyStruct(v, *table, field_def->offset(), *child_obj,
+          if (!VerifyStruct(v, schema, *table, field_def->offset(), *child_obj,
                             field_def->required())) {
             return false;
           }
@@ -378,18 +487,28 @@ std::string GetAnyValueS(reflection::BaseType type, const uint8_t* data,
 
 void ForAllFields(const reflection::Object* object, bool reverse,
                   std::function<void(const reflection::Field*)> func) {
-  std::vector<uint32_t> field_to_id_map;
-  field_to_id_map.resize(object->fields()->size());
+  const auto field_count = object->fields()->size();
+  std::vector<uint32_t> field_to_id_map(field_count);
+  for (uint32_t i = 0; i < field_count; ++i) { field_to_id_map[i] = i; }
+
+  std::vector<uint8_t> seen(field_count, 0);
+  bool use_id_order = true;
 
   // Create the mapping of field ID to the index into the vector.
-  for (uint32_t i = 0; i < object->fields()->size(); ++i) {
+  for (uint32_t i = 0; i < field_count; ++i) {
     auto field = object->fields()->Get(i);
+    if (field->id() >= field_count || seen[field->id()]) {
+      use_id_order = false;
+      break;
+    }
     field_to_id_map[field->id()] = i;
+    seen[field->id()] = 1;
   }
 
   for (size_t i = 0; i < field_to_id_map.size(); ++i) {
-    func(object->fields()->Get(
-        field_to_id_map[reverse ? field_to_id_map.size() - (i + 1) : i]));
+    const auto index = reverse ? field_to_id_map.size() - (i + 1) : i;
+    const auto field_index = use_id_order ? field_to_id_map[index] : index;
+    func(object->fields()->Get(field_index));
   }
 }
 
@@ -564,8 +683,11 @@ class ResizeContext {
             break;
           }
           case reflection::Union: {
-            ResizeTable(GetUnionType(schema_, objectdef, fielddef, *table),
-                        reinterpret_cast<Table*>(ref));
+            auto union_object =
+                GetUnionTypeObject(schema_, objectdef, fielddef, *table);
+            if (union_object) {
+              ResizeTable(*union_object, reinterpret_cast<Table*>(ref));
+            }
             break;
           }
           case reflection::String:
@@ -669,8 +791,10 @@ Offset<const Table*> CopyTable(FlatBufferBuilder& fbb,
     // Skip if field is not present in the source.
     if (!table.CheckField(fielddef.offset())) continue;
     uoffset_t offset = 0;
+    bool has_offset_slot = false;
     switch (fielddef.type()->base_type()) {
       case reflection::String: {
+        has_offset_slot = true;
         offset = use_string_pooling
                      ? fbb.CreateSharedString(GetFieldS(table, fielddef)).o
                      : fbb.CreateString(GetFieldS(table, fielddef)).o;
@@ -679,6 +803,7 @@ Offset<const Table*> CopyTable(FlatBufferBuilder& fbb,
       case reflection::Obj: {
         auto& subobjectdef = *schema.objects()->Get(fielddef.type()->index());
         if (!subobjectdef.is_struct()) {
+          has_offset_slot = true;
           offset = CopyTable(fbb, schema, subobjectdef,
                              *GetFieldT(table, fielddef), use_string_pooling)
                        .o;
@@ -686,13 +811,18 @@ Offset<const Table*> CopyTable(FlatBufferBuilder& fbb,
         break;
       }
       case reflection::Union: {
-        auto& subobjectdef = GetUnionType(schema, objectdef, fielddef, table);
-        offset = CopyTable(fbb, schema, subobjectdef,
-                           *GetFieldT(table, fielddef), use_string_pooling)
-                     .o;
+        has_offset_slot = true;
+        auto* subobjectdef =
+            GetUnionTypeObject(schema, objectdef, fielddef, table);
+        if (subobjectdef) {
+          offset = CopyTable(fbb, schema, *subobjectdef,
+                             *GetFieldT(table, fielddef), use_string_pooling)
+                       .o;
+        }
         break;
       }
       case reflection::Vector: {
+        has_offset_slot = true;
         auto vec =
             table.GetPointer<const Vector<Offset<Table>>*>(fielddef.offset());
         auto element_base_type = fielddef.type()->element();
@@ -740,7 +870,7 @@ Offset<const Table*> CopyTable(FlatBufferBuilder& fbb,
       default:  // Scalars.
         break;
     }
-    if (offset) {
+    if (offset || has_offset_slot) {
       offsets.push_back(offset);
     }
   }

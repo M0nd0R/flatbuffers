@@ -66,13 +66,20 @@ static void ForAllDocumentation(
 // Maps the field index into object->fields() to the field's ID (the ith element
 // in the return vector).
 static std::vector<uint32_t> FieldIdToIndex(const reflection::Object* object) {
-  std::vector<uint32_t> field_index_by_id;
-  field_index_by_id.resize(object->fields()->size());
+  const auto field_count = object->fields()->size();
+  std::vector<uint32_t> field_index_by_id(field_count);
+  for (uint32_t i = 0; i < field_count; ++i) { field_index_by_id[i] = i; }
+
+  std::vector<uint8_t> seen(field_count, 0);
 
   // Create the mapping of field ID to the index into the vector.
-  for (uint32_t i = 0; i < object->fields()->size(); ++i) {
+  for (uint32_t i = 0; i < field_count; ++i) {
     auto field = object->fields()->Get(i);
+    if (field->id() >= field_count || seen[field->id()]) {
+      return field_index_by_id;
+    }
     field_index_by_id[field->id()] = i;
+    seen[field->id()] = 1;
   }
 
   return field_index_by_id;

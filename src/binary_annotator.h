@@ -423,7 +423,7 @@ class BinaryAnnotator {
       return false;
     }
 
-    return value < enum_def->values()->size();
+    return enum_def->values()->LookupByKey(value) != nullptr;
   }
 
   uint64_t GetElementSize(const reflection::Field* const field) {

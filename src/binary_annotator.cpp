@@ -1411,13 +1411,16 @@ std::string BinaryAnnotator::BuildUnion(const uint64_t union_offset,
   const reflection::Enum* next_enum =
       schema_->enums()->Get(field->type()->index());
 
-  const reflection::EnumVal* enum_val = next_enum->values()->Get(realized_type);
+  const reflection::EnumVal* enum_val =
+      next_enum->values()->LookupByKey(realized_type);
+  if (!enum_val) { return ""; }
 
   if (ContainsSection(union_offset)) {
     return enum_val->name()->c_str();
   }
 
   const reflection::Type* union_type = enum_val->union_type();
+  if (!union_type) { return ""; }
 
   if (union_type->base_type() == reflection::BaseType::Obj) {
     const reflection::Object* object =
