@@ -508,6 +508,22 @@ namespace Google.FlatBuffers.Test
         }
 
         [FlatBuffersTestMethod]
+        public void TestUnionVectorVerifierRejectsTypeStrideMismatch()
+        {
+            var validBuffer = BuildMovieBufferWithUnionVector();
+            Assert.IsTrue(Movie.VerifyMovie(validBuffer));
+
+            var invalidBuffer = BuildMovieBufferWithInvalidUnionVectorType();
+            var movie = Movie.GetRootAsMovie(invalidBuffer);
+            Assert.AreEqual(Character.Other, movie.CharactersType(1));
+
+            var verifier = new Verifier(invalidBuffer);
+            var tablePos = (uint)(invalidBuffer.GetInt(invalidBuffer.Position) + invalidBuffer.Position);
+            Assert.IsFalse(verifier.VerifyVectorOfUnion(tablePos, 8, 10, CharacterVerify.Verify, false));
+            Assert.IsFalse(Movie.VerifyMovie(invalidBuffer));
+        }
+
+        [FlatBuffersTestMethod]
         public void TestUnionUtility()
         {
             var movie = new MovieT
@@ -525,6 +541,55 @@ namespace Google.FlatBuffers.Test
             Movie.FinishMovieBuffer(fbb, Movie.Pack(fbb, movie));
 
             TestObjectAPI(Movie.GetRootAsMovie(fbb.DataBuffer));
+        }
+
+        private static ByteBuffer BuildMovieBufferWithUnionVector()
+        {
+            var fbb = new FlatBufferBuilder(100);
+            var rapunzel = Rapunzel.CreateRapunzel(fbb, 40).Value;
+
+            var characterTypes = new[]
+            {
+                Character.MuLan,
+                Character.Belle,
+            };
+            var characterTypesOffset = Movie.CreateCharactersTypeVector(fbb, characterTypes);
+
+            var characters = new[]
+            {
+                Attacker.CreateAttacker(fbb, 10).Value,
+                BookReader.CreateBookReader(fbb, 20).Value,
+            };
+            var charactersOffset = Movie.CreateCharactersVector(fbb, characters);
+
+            var movieOffset = Movie.CreateMovie(
+                fbb,
+                Character.Rapunzel,
+                rapunzel,
+                characterTypesOffset,
+                charactersOffset);
+            Movie.FinishMovieBuffer(fbb, movieOffset);
+
+            return new ByteBuffer(fbb.DataBuffer.ToSizedArray());
+        }
+
+        private static ByteBuffer BuildMovieBufferWithInvalidUnionVectorType()
+        {
+            var invalidBuffer = BuildMovieBufferWithUnionVector();
+            var tablePos = invalidBuffer.GetInt(invalidBuffer.Position) + invalidBuffer.Position;
+            var table = new Table(tablePos, invalidBuffer);
+
+            var typeVectorOffset = table.__offset(8);
+            var typeVectorStart = table.__vector(typeVectorOffset);
+            var valueVectorOffset = table.__offset(10);
+            var valueVectorStart = table.__vector(valueVectorOffset);
+            var secondValueOffset = valueVectorStart + sizeof(int);
+
+            invalidBuffer.Put(typeVectorStart + 1, (byte)Character.Other);
+            invalidBuffer.Put(typeVectorStart + 4, (byte)Character.Belle);
+            invalidBuffer.PutUint(secondValueOffset, (uint)(typeVectorStart - secondValueOffset));
+
+            return invalidBuffer;
         }
 
         private void AreEqual(Monster a, MonsterT b)

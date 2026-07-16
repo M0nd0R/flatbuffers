@@ -785,7 +785,18 @@ class CSharpGenerator : public BaseGenerator {
             break;
           }
           case BASE_TYPE_UNION: {
-            // Vectors of unions are not yet supported for go
+            auto union_name = NamespacedName(*field.value.type.enum_def);
+            code_.SetValue("ENUM_NAME", union_name);
+            // Caution: This construction assumes, that UNION type id element has
+            // been created just before union data and its offset precedes union.
+            // Such assumption is common in flatbuffer implementation
+            code_.SetValue("TYPE_ID_OFFSET",
+                           NumToString(field.value.offset - sizeof(voffset_t)));
+            code_ +=
+                "{{PRE}}      && verifier.VerifyVectorOfUnion(tablePos, "
+                "{{TYPE_ID_OFFSET}}, "
+                "{{OFFSET}} /*{{NAME}}*/, {{ENUM_NAME}}Verify.Verify, "
+                "{{REQUIRED_FLAG}})";
             break;
           }
           default:
